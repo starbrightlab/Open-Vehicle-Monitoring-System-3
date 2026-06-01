@@ -307,6 +307,15 @@ void OvmsVehicleNissanLeaf::CommandInit()
     "Where <request> includes mode (01, 02, 09, 10, 1A, 21 or 22) and pid.\n"
     "Example: 79B 7BB 2101", 3, 3);
   cmd_can2->RegisterCommand("broadcast", "Send OBD2 request as broadcast", shell_obd_request, "<request>", 1, 1);
+
+  // DTC subcommands - decoded UDS Mode 19/14 against BMS
+  OvmsCommand* dtc = cmd_xnl->RegisterCommand("dtc", "DTC management");
+  dtc->RegisterCommand("read", "Read DTCs from BMS (decoded)", shell_dtc_read,
+    "[<txid> <rxid> [<bus>]]\n"
+    "Defaults: txid=79B rxid=7BB bus=1 (BMS on EV-CAN).", 0, 3);
+  dtc->RegisterCommand("clear", "Clear DTCs from BMS", shell_dtc_clear,
+    "[<txid> <rxid> [<bus>]]\n"
+    "Defaults: txid=79B rxid=7BB bus=1 (BMS on EV-CAN).", 0, 3);
   }
 
 void OvmsVehicleNissanLeaf::ConfigChanged(OvmsConfigParam* param)
@@ -595,6 +604,108 @@ void OvmsVehicleNissanLeaf::shell_obd_request(int verbosity, OvmsWriter* writer,
     } while (rlen);
     if (buf)
       free(buf);
+  }
+
+void OvmsVehicleNissanLeaf::shell_dtc_read(int verbosity, OvmsWriter* writer, OvmsCommand* cmd, int argc, const char* const* argv)
+  {
+  OvmsVehicleNissanLeaf* nl = GetInstance(writer);
+  if (!nl) return;
+  if (!MyConfig.GetParamValueBool("xnl", "canwrite", false))
+    {
+    writer->puts("ERROR: canwrite not enabled");
+    return;
+    }
+
+  uint16_t txid = 0x79b, rxid = 0x7bb;
+  uint8_t bus = 1;  // EV-CAN by default (BMS)
+  uint32_t req = 0x1902FF;  // Mode 19 reportDTCByStatusMask, mask=FF (all)
+  if (argc >= 2)
+    {
+    txid = strtol(argv[0], NULL, 16);
+    rxid = strtol(argv[1], NULL, 16);
+    }
+  if (argc >= 3)
+    bus = (uint8_t)strtol(argv[2], NULL, 10);
+
+  string response;
+  if (!nl->ObdRequest(txid, rxid, req, response, 3000, bus))
+    {
+    writer->puts("ERROR: timeout waiting for response");
+    return;
+    }
+
+  const unsigned char* b = (const unsigned char*)response.data();
+  size_t rlen = response.size();
+  // Mode 19/02 positive response: [0]=sub-func echo, [1]=status mask, [2..]=DTC records (4 bytes each)
+  if (rlen < 2)
+    {
+    writer->puts("ERROR: response too short");
+    return;
+    }
+  if (rlen < 6)
+    {
+    writer->printf("No DTCs (%d bytes, mask=%02X)\n", (int)rlen, b[1]);
+    return;
+    }
+  int n_dtcs = (rlen - 2) / 4;
+  writer->printf("DTCs (%d):\n", n_dtcs);
+  static const char letters[4] = {'P', 'C', 'B', 'U'};
+  for (int i = 0; i < n_dtcs; i++)
+    {
+    size_t off = 2 + i * 4;
+    if (off + 4 > rlen) break;
+    unsigned char d1 = b[off];
+    unsigned char d2 = b[off + 1];
+    unsigned char sub = b[off + 2];
+    unsigned char status = b[off + 3];
+    char letter = letters[(d1 >> 6) & 0x03];
+    int digit2 = (d1 >> 4) & 0x03;
+    int digit3 = d1 & 0x0F;
+    writer->printf("  %c%X%X%02X-%02X status=%02X\n",
+                   letter, digit2, digit3, d2, sub, status);
+    }
+  }
+
+void OvmsVehicleNissanLeaf::shell_dtc_clear(int verbosity, OvmsWriter* writer, OvmsCommand* cmd, int argc, const char* const* argv)
+  {
+  OvmsVehicleNissanLeaf* nl = GetInstance(writer);
+  if (!nl) return;
+  if (!MyConfig.GetParamValueBool("xnl", "canwrite", false))
+    {
+    writer->puts("ERROR: canwrite not enabled");
+    return;
+    }
+
+  uint16_t txid = 0x79b, rxid = 0x7bb;
+  uint8_t bus = 1;
+  uint32_t req = 0x14FFFFFF;  // Mode 14 Clear DTCs, group=FFFFFF (all)
+  if (argc >= 2)
+    {
+    txid = strtol(argv[0], NULL, 16);
+    rxid = strtol(argv[1], NULL, 16);
+    }
+  if (argc >= 3)
+    bus = (uint8_t)strtol(argv[2], NULL, 10);
+
+  string response;
+  if (!nl->ObdRequest(txid, rxid, req, response, 3000, bus))
+    {
+    writer->puts("ERROR: timeout waiting for response");
+    return;
+    }
+
+  // Mode 14 positive response: single byte 0x54 (service id + 0x40)
+  if (response.size() >= 1 && (unsigned char)response[0] == 0x54)
+    {
+    writer->puts("OK: DTCs cleared");
+    }
+  else
+    {
+    writer->printf("Unexpected response (%d bytes): ", (int)response.size());
+    for (size_t i = 0; i < response.size(); i++)
+      writer->printf("%02X ", (unsigned char)response[i]);
+    writer->puts("");
+    }
   }
 
 bool OvmsVehicleNissanLeaf::ObdRequest(uint16_t txid, uint16_t rxid, uint32_t request, string& response, int timeout_ms /*=3000*/, uint8_t bus)

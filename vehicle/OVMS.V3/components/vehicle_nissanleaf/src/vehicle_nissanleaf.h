@@ -152,6 +152,8 @@ class OvmsVehicleNissanLeaf : public OvmsVehicle
     static void WebCfgBattery(PageEntry_t& p, PageContext_t& c);
 #endif
     static void shell_obd_request(int verbosity, OvmsWriter* writer, OvmsCommand* cmd, int argc, const char* const* argv);
+    static void shell_dtc_read(int verbosity, OvmsWriter* writer, OvmsCommand* cmd, int argc, const char* const* argv);
+    static void shell_dtc_clear(int verbosity, OvmsWriter* writer, OvmsCommand* cmd, int argc, const char* const* argv);
 
   public:
     void GetDashboardConfig(DashboardConfig& cfg);
