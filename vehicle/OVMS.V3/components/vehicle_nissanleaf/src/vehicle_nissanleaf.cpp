@@ -2175,6 +2175,42 @@ void OvmsVehicleNissanLeaf::CcDisableTimer()
   SendCommand(AUTO_DISABLE_CLIMATE_CONTROL);
   }
 
+void OvmsVehicleNissanLeaf::HandleCellImbalanceAlert()
+  {
+  // Cell-voltage spread (vmax - vmin) watchdog. Requires N consecutive samples
+  // above threshold before alerting — filters out single-sample CAN-read
+  // artifacts (e.g. cells 93-96 read corruption on AZE0 + Dala bridge).
+  // Configurable via xnl.bat.spread.warn (mV) and xnl.bat.spread.cycles.
+  float vmin = StandardMetrics.ms_v_bat_pack_vmin->AsFloat();
+  float vmax = StandardMetrics.ms_v_bat_pack_vmax->AsFloat();
+  if (vmin <= 0.0f || vmax <= 0.0f || vmax < vmin) return;
+  float spread_mv = (vmax - vmin) * 1000.0f;
+  if (spread_mv < 0.0f || spread_mv > 5000.0f) return;  // sanity
+
+  float threshold_mv = MyConfig.GetParamValueFloat("xnl", "bat.spread.warn", 30.0f);
+  int required_cycles = MyConfig.GetParamValueInt("xnl", "bat.spread.cycles", 3);
+
+  if (spread_mv >= threshold_mv)
+    {
+    m_cell_spread_streak++;
+    if (m_cell_spread_streak == required_cycles)
+      {
+      MyNotify.NotifyStringf("alert", "v-nissanleaf.bat.spread",
+        "HV cell imbalance: spread %.0f mV >= %.0f mV for %d samples",
+        spread_mv, threshold_mv, required_cycles);
+      }
+    }
+  else
+    {
+    if (m_cell_spread_streak >= required_cycles)
+      {
+      MyNotify.NotifyStringf("info", "v-nissanleaf.bat.spread",
+        "HV cell imbalance cleared: spread now %.0f mV", spread_mv);
+      }
+    m_cell_spread_streak = 0;
+    }
+  }
+
 void OvmsVehicleNissanLeaf::HandleBatteryTempAlert()
   {
   // FL summer pack-temp watchdog. Configurable thresholds via xnl.bat.temp.warn / .crit (Celsius).
@@ -2222,6 +2258,7 @@ void OvmsVehicleNissanLeaf::Ticker10(uint32_t ticker)
   HandleChargeEstimation();
   HandleExporting();
   HandleBatteryTempAlert();
+  HandleCellImbalanceAlert();
   if (StandardMetrics.ms_v_bat_12v_voltage->AsFloat() > 12.8)
     {
     StandardMetrics.ms_v_env_charging12v->SetValue(true);
