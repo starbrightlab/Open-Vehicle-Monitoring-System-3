@@ -1,0 +1,103 @@
+name: Build OVMS Firmware
+
+on:
+  push:
+    branches: [ '**' ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 0
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y git wget flex bison gperf python3 python3-pip python3-setuptools \
+          python3-venv libncurses-dev libffi-dev libssl-dev python-is-python3
+
+    - name: Setup OVMS ESP-IDF (their fork)
+      run: |
+        cd ~
+        git clone -b release/v3.3 --recursive https://github.com/openvehicles/esp-idf.git
+        cd esp-idf
+        ./install.sh esp32
+
+        # ESP-IDF v3.3's idf_tools.py imports `pkg_resources` from setuptools.
+        # `pkg_resources` was deprecated and REMOVED in setuptools 80+ (2025).
+        # install.sh ships setuptools 82, so pkg_resources is gone — pin to <80.
+        # Both the IDF venv's Python and the system Python need this.
+
+        echo ""
+        echo "=== Locating IDF venv python ==="
+        # The venv's bin/python is a symlink, so we resolve via shell globbing
+        # rather than `find -type f` (which skips symlinks).
+        VENV_PY=$(ls -d ~/.espressif/python_env/*/bin/python 2>/dev/null | head -1)
+        echo "venv python: ${VENV_PY:-NONE}"
+
+        if [ -n "$VENV_PY" ] && [ -x "$VENV_PY" ]; then
+          echo "--- Pinning IDF venv to setuptools<80 (pkg_resources still present) ---"
+          "$VENV_PY" -m pip install --upgrade 'pip<25' 'setuptools<80' 'wheel<0.45'
+        else
+          echo "WARNING: IDF venv python not found at expected path"
+          ls -la ~/.espressif/python_env/ || true
+        fi
+
+        echo ""
+        echo "=== Pinning SYSTEM python3 to setuptools<80 (belt-and-suspenders) ==="
+        python3 -m pip install --user --upgrade 'pip<25' 'setuptools<80' 'wheel<0.45'
+
+        echo ""
+        echo "=== Verify pkg_resources importable from each Python ==="
+        for py in "$VENV_PY" /usr/bin/python3; do
+          if [ -n "$py" ] && [ -x "$py" ]; then
+            printf "  %-65s " "$py"
+            "$py" -c 'import pkg_resources, setuptools; print("OK setuptools=" + setuptools.__version__)' 2>&1 | head -1 || true
+          fi
+        done
+
+    - name: Build firmware
+      run: |
+        source ~/esp-idf/export.sh
+        cd vehicle/OVMS.V3
+        # Pre-seed HW31 sdkconfig so make never needs to run defconfig interactively.
+        cp support/sdkconfig.default.hw31 sdkconfig
+
+        # The IDF release/v3.3 branch has occasionally added Kconfig options that
+        # post-date OVMS's pre-seeded sdkconfig.default.hw31. When that happens,
+        # `make` silently invokes conf-idf which asks for input on "(NEW)" options
+        # and aborts under CI's redirected stdin.
+        # Use conf-idf --olddefconfig to non-interactively accept defaults for any
+        # new options. Build the kconfig tools first so the binary exists.
+        make -C "${IDF_PATH}/tools/kconfig" conf-idf 2>&1 | tail -3
+        if [ -x "${IDF_PATH}/tools/kconfig/conf-idf" ]; then
+          # Assemble Kconfig the same way IDF's make does
+          KCONFIG_AUTOCONFIG="$(pwd)/build/include/config/auto.conf" \
+          KCONFIG_AUTOHEADER="$(pwd)/build/include/sdkconfig.h" \
+          KCONFIG_CONFIG="$(pwd)/sdkconfig" \
+          IDF_TARGET=esp32 \
+            "${IDF_PATH}/tools/kconfig/conf-idf" --olddefconfig "${IDF_PATH}/Kconfig" 2>&1 | tail -10 || true
+        fi
+
+        # Fallback: if the above didn't touch sdkconfig, append the one known
+        # new option so a future make doesn't prompt for it.
+        grep -q "^CONFIG_LWIP_IP_FRAG=" sdkconfig || echo "CONFIG_LWIP_IP_FRAG=y" >> sdkconfig
+
+        export BATCH_BUILD=1
+        make -j$(nproc)
+        
+    - name: Upload firmware artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ovms-firmware
+        path: |
+          vehicle/OVMS.V3/build/ovms3.bin
+          vehicle/OVMS.V3/build/partitions.bin
+          vehicle/OVMS.V3/build/ota_data_initial.bin
+        retention-days: 30
