@@ -2175,6 +2175,31 @@ void OvmsVehicleNissanLeaf::CcDisableTimer()
   SendCommand(AUTO_DISABLE_CLIMATE_CONTROL);
   }
 
+void OvmsVehicleNissanLeaf::HandleBatteryTempAlert()
+  {
+  // FL summer pack-temp watchdog. Configurable thresholds via xnl.bat.temp.warn / .crit (Celsius).
+  // Defaults: warn=43C (110F), crit=50C (122F). Notifies on state transition (hysteresis-aware).
+  float temp_c = StandardMetrics.ms_v_bat_pack_tmax->AsFloat(20, Celcius);
+  // Sanity guard: reject obviously bad sensor reads
+  if (temp_c < -50.0f || temp_c > 100.0f) return;
+
+  float warn_c = MyConfig.GetParamValueFloat("xnl", "bat.temp.warn", 43.0f);
+  float crit_c = MyConfig.GetParamValueFloat("xnl", "bat.temp.crit", 50.0f);
+
+  int new_level = 0;
+  if (temp_c >= crit_c) new_level = 2;
+  else if (temp_c >= warn_c) new_level = 1;
+
+  if (new_level != m_bat_temp_alert_level)
+    {
+    static const char* labels[3] = { "NORMAL", "WARN", "CRIT" };
+    MyNotify.NotifyStringf("alert", "v-nissanleaf.bat.temp",
+      "HV pack temp %s: max %.1f C (warn=%.1f crit=%.1f)",
+      labels[new_level], temp_c, warn_c, crit_c);
+    m_bat_temp_alert_level = new_level;
+    }
+  }
+
 /**
  * Ticker1: Called every second
  */
@@ -2196,6 +2221,7 @@ void OvmsVehicleNissanLeaf::Ticker10(uint32_t ticker)
   HandleCharging();
   HandleChargeEstimation();
   HandleExporting();
+  HandleBatteryTempAlert();
   if (StandardMetrics.ms_v_bat_12v_voltage->AsFloat() > 12.8)
     {
     StandardMetrics.ms_v_env_charging12v->SetValue(true);

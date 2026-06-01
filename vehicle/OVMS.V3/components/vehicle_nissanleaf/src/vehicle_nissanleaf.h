@@ -170,6 +170,7 @@ class OvmsVehicleNissanLeaf : public OvmsVehicle
     void HandleChargeEstimation();
     void HandleExporting();
     void HandleRange();
+    void HandleBatteryTempAlert();
     int  calcMinutesRemaining(float target, float charge_power_w);
     void SendCommand(RemoteCommand);
     OvmsVehicle::vehicle_command_t RemoteCommandHandler(RemoteCommand command);
@@ -193,6 +194,7 @@ class OvmsVehicleNissanLeaf : public OvmsVehicle
     TimerHandle_t m_ccDisableTimer;
     TimerHandle_t m_MITMstop;
     metric_unit_t m_odometer_units = Other;
+    int m_bat_temp_alert_level = 0;  // 0=normal 1=warn 2=crit (hysteresis state)
     OvmsMetricInt *m_gids;
     OvmsMetricInt *m_max_gids;
     OvmsMetricFloat *m_hx;
